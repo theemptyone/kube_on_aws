@@ -1,0 +1,15 @@
+# tasks file for kube_on_aws
+
+- name: Update package list and upgrade system
+  apt: 
+    update_cache: yes
+    upgrade: dist
+
+- name: Check if containerd is installed
+  stat:
+    path: /etc/containerd/config.toml
+  register: containerd_config
+
+- name: Include setup_kubernetes.yml if containerd is not installed
+  include_tasks: setup_kubernetes.yml
+  when: not containerd_config.stat.exists

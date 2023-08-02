@@ -1,0 +1,205 @@
+---
+# Install Dependencies
+- name: Update apt cache and install required packages
+  apt:
+    update_cache: yes
+    name:
+      - apt-transport-https
+      - curl
+      - gnupg
+      - python3-pip
+      - net-tools
+
+# Setup Kubernetes Repositories
+- name: Add Kubernetes apt key
+  apt_key:
+    url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+    state: present
+
+- name: Add Kubernetes apt repository
+  apt_repository:
+    repo: deb http://apt.kubernetes.io/ kubernetes-xenial main
+    state: present
+
+# Setup Containerd Modules
+- name: Create containerd module file
+  file:
+    path: "/etc/modules-load.d/kube_modules.conf"
+    state: touch
+
+- name: Write containerd module file
+  template:
+    src: kube_modules.conf.j2
+    dest: /etc/modules-load.d/kube_modules.conf
+
+- name: Enable containerd modules
+  raw: modprobe overlay; modprobe br_netfilter
+
+# Setup Kubernetes Sysctl Parameters
+- name: Copy kube_sysctl.conf file
+  template:
+    src: kube_sysctl.conf.j2
+    dest: /etc/sysctl.d/99-kubernetes-cri.conf
+
+- name: Configure Kubernetes sysctl parameters
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+  with_items:
+    - { key: net.bridge.bridge-nf-call-iptables, value: 1 }
+    - { key: net.bridge.bridge-nf-call-ip6tables, value: 1 }
+    - { key: net.ipv4.ip_forward, value: 1 }
+
+- name: Apply new settings
+  command: sudo sysctl --system
+
+# Disable Swap
+- name: Disable swap
+  command: swapoff -a
+  ignore_errors: yes
+  changed_when: false
+
+- name: Disable swap permanently in fstab
+  replace:
+    path: /etc/fstab
+    regexp: '^/dev/mapper/ubuntu--vg-swap_1'
+    replace: '#/dev/mapper/ubuntu--vg-swap_1'
+  notify: Reboot Server
+
+# Install and Setup Containerd
+- name: Install containerd
+  apt:
+    name: containerd
+    state: present
+
+- name: Create containerd config directory
+  file:
+    path: /etc/containerd
+    state: directory
+
+- name: Create default containerd config
+  shell: containerd config default | sudo tee /etc/containerd/config.toml
+  args:
+    creates: /etc/containerd/config.toml
+
+- name: Update /etc/containerd/config.toml
+  become: true
+  lineinfile:
+    path: /etc/containerd/config.toml
+    regexp: '^SystemdCgroup\s*=\s*false'
+    line: 'SystemdCgroup = true'
+
+- name: Restart containerd
+  service: 
+    name: containerd
+    enabled: yes
+    state: restarted
+
+# Install Kubernetes
+- name: Install Kubernetes packages
+  apt:
+    name:
+      - kubelet={{ kubernetes_version }}-*
+      - kubeadm={{ kubernetes_version }}-*
+      - kubectl={{ kubernetes_version }}-*
+    state: present
+
+- name: Lock Kubelet
+  dpkg_selections:
+    name: kubeadm
+    selection: hold
+
+- name: Lock Kubeadm
+  dpkg_selections:
+    name: kubelet
+    selection: hold
+
+- name: Lock Kubectl
+  dpkg_selections:
+    name: kubectl
+    selection: hold
+
+# Initialize Kubernetes on master
+- name: Initialize Kubernetes Control Plane
+  shell: kubeadm init --pod-network-cidr {{ kubernetes_pod_network_cidr }} --kubernetes-version {{ kubernetes_version }}
+  args:
+    executable: /bin/bash
+  when: "inventory_hostname in groups['control_plane']"
+
+# Setup Kube Config on master
+- name: Create Kubernetes config directory
+  file:
+    path: $HOME/.kube
+    state: directory
+    mode: 0755
+  become: true
+  become_user: "{{ default_user }}"
+  when: "inventory_hostname in groups['control_plane']"
+
+- name: Copy Kubernetes admin.conf to user's kube config
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/{{ default_user }}/.kube/config
+    remote_src: yes
+    owner: "{{ default_user }}"
+    mode: 0644
+  when: "inventory_hostname in groups['control_plane']"
+
+- name: Wait for the port to be listening
+  wait_for:
+    host: 127.0.0.1
+    port: 6443
+    state: started
+    timeout: 300
+  when: "inventory_hostname in groups['control_plane']"
+
+# Setup Kubernetes Networking on master
+- name: Setup Calico Networking Plugin
+  shell: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+  args:
+    executable: /bin/bash
+    chdir: $HOME
+  become: true
+  become_user: "{{ default_user }}"
+  when: "inventory_hostname in groups['control_plane']"
+
+# Get Worker Join Command
+- name: Get join command from master
+  shell: kubeadm token create --print-join-command
+  run_once: true
+  register: join_command
+  when: "inventory_hostname in groups['control_plane']"
+
+- name: Wait for Kubernetes nodes to be in 'Ready' state
+  command: kubectl get nodes -o json | grep -A1 KubeletReady | grep -v KubeletReady | awk -F'"' '{print $4}'
+  register: kubectl_output
+  until: kubectl_output.stdout == ['True']
+  retries: 30
+  delay: 10
+  become: true
+  become_user: "{{ default_user }}"
+  when: "inventory_hostname in groups['control_plane']"
+
+# Join the Kubernetes Worker Nodes to the Cluster
+- name: Join the Kubernetes cluster
+  shell: "{{ join_command.stdout }}"
+  when: "inventory_hostname in groups['worker']"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
