@@ -3,7 +3,18 @@
 - name: Update package list and upgrade system
   apt: 
     update_cache: yes
-    upgrade: dist
+    upgrade: full
+
+# Install Baseline Dependencies
+- name: Update apt cache and install required packages
+  apt:
+    update_cache: yes
+    name:
+      - apt-transport-https
+      - curl
+      - gnupg
+      - python3-pip
+      - net-tools
 
 - name: Check if containerd is installed
   stat:
